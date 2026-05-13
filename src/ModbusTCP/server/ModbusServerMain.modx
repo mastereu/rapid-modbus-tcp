@@ -41,11 +41,14 @@ MODULE ModbusServerMain
     ! [PERIOD_TIME]: Modbus Server Default Response Period 200ms
     LOCAL CONST num PERIOD_TIME:=0.2;
     LOCAL CONST string ModbusServerLogFile:="ModbusServer.txt";
-    Task VAR ModbusSocket Server;
-    Task VAR ModbusSocket Client;
     Task VAR ModbusServerConfig ServerConfig;
 
     PROC Main()
+        ! Server and Client declared as local VAR (not Task VAR) to avoid
+        ! error 41605 "socket not valid" after ExitCycle in a STATIC task.
+        ! A Task VAR socketdev persists across ExitCycle and the handle becomes stale.
+        VAR ModbusSocket Server;
+        VAR ModbusSocket Client;
         VAR byte mbapBytes{7};
         VAR num mbapLen;
         VAR ModbusMBAP mbap;
@@ -144,6 +147,13 @@ MODULE ModbusServerMain
         ENDIF
         IF ERRNO=ERR_MB_FORMAT OR ERRNO=ERR_MB_FUNCTION THEN
             TRYNEXT;
+        ENDIF
+        ! Normal client disconnection (e.g. HMI doing periodic close/reopen).
+        ! Suppress log and recycle the socket by reopening the connection.
+        IF ERRNO=ERR_SOCK_CLOSED OR ERRNO=ERR_SOCK_NOT_CONN OR ERRNO=ERR_SOCK_NET_UNREACH THEN
+            SkipWarn;
+            MbServerStatus:=FALSE;
+            ExitCycle;
         ENDIF
         MbServerStatus:=FALSE;
         ExitCycle;

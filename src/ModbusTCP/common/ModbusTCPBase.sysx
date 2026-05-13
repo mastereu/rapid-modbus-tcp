@@ -480,6 +480,11 @@ MODULE ModbusTCPBase(SYSMODULE,VIEWONLY)
         IF ERRNO=ERR_SOCK_TIMEOUT THEN
             TimeOut:=TRUE;
             TRYNEXT;
+        ELSEIF ERRNO=ERR_SOCK_CLOSED OR ERRNO=ERR_SOCK_NOT_CONN OR ERRNO=ERR_SOCK_NET_UNREACH THEN
+            ! Normal client disconnection (e.g. HMI doing periodic close/reopen).
+            ! Suppress system event log and propagate to the main loop to recycle the socket.
+            SkipWarn;
+            RAISE ;
         ELSE
             RAISE ;
         ENDIF
@@ -514,6 +519,9 @@ MODULE ModbusTCPBase(SYSMODULE,VIEWONLY)
         VAR rawbytes bytes;
         VAR num len;
 
+        ! Avoid SocketPeek on an already-disconnected socket
+        ! (e.g. Modbus client/HMI doing periodic close - normal behavior)
+        IF SocketGetStatus(MbSocket)<>SOCKET_CONNECTED RETURN;
         len:=SocketPeek(MbSocket);
         IF len>1024 THEN
            len:=1024;
@@ -521,6 +529,15 @@ MODULE ModbusTCPBase(SYSMODULE,VIEWONLY)
         IF len > 0 THEN
            SocketReceive MbSocket\RawData:=bytes\ReadNoOfBytes:=len\Time:=0.05;
         ENDIF
+    ERROR
+        ! Client closed the connection during the flush.
+        ! Suppress system log (SkipWarn within the SocketPeek/SocketReceive scope)
+        ! and propagate to the main loop to recycle the socket.
+        IF ERRNO=ERR_SOCK_CLOSED OR ERRNO=ERR_SOCK_NOT_CONN OR ERRNO=ERR_SOCK_NET_UNREACH THEN
+            SkipWarn;
+            RAISE ;
+        ENDIF
+        RAISE ;
     ENDPROC
     
     ! Procedure: MbPrintSocketState
