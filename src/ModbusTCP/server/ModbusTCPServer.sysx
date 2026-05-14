@@ -263,14 +263,14 @@ MODULE ModbusTCPServer(SYSMODULE,VIEWONLY)
         IF StartAddress>=SYS_OUTPUT_COILS_MIN AND StartAddress<=SYS_OUTPUT_COILS_MAX THEN
             ! 0-15 readonly
             IF Present(Read) THEN
-                Val:=MbGetDO("mb_sdo"+ValToStr(StartAddress));
+                Val:=ReadCachedDO(StartAddress,"mb_sdo");
             ELSE
                 RETURN ;
             ENDIF
         ELSEIF StartAddress>=SYS_INPUT_COILS_MIN AND StartAddress<=SYS_INPUT_COILS_MAX THEN
             ! 16-31 read di and write by vdo
             IF Present(Read) THEN
-                Val:=MbGetDI("mb_sdi"+ValToStr(StartAddress));
+                Val:=ReadCachedDI(StartAddress,"mb_sdi");
             ELSE
                 MbSetDI "mb_vdo"+ValToStr(StartAddress),val;
                 RETURN ;
@@ -279,14 +279,14 @@ MODULE ModbusTCPServer(SYSMODULE,VIEWONLY)
         ELSEIF StartAddress>=USER_OUTPUT_COILS_MIN AND StartAddress<=USER_OUTPUT_COILS_MAX THEN
             ! 32-95 readonly
             IF Present(Read) THEN
-                Val:=MbGetDO("mb_do"+ValToStr(StartAddress));
+                Val:=ReadCachedDO(StartAddress,"mb_do");
             ELSE
                 RETURN ;
             ENDIF
         ELSEIF StartAddress>=USER_INPUT_COILS_MIN AND StartAddress<=USER_INPUT_COILS_MAX THEN
             ! 96-159 read di and write by vdo
             IF Present(Read) THEN
-                Val:=MbGetDI("mb_di"+ValToStr(StartAddress));
+                Val:=ReadCachedDI(StartAddress,"mb_di");
             ELSE
                 MbSetDI "mb_vdo"+ValToStr(StartAddress),Val;
                 RETURN ;
@@ -297,6 +297,50 @@ MODULE ModbusTCPServer(SYSMODULE,VIEWONLY)
 
 
     ENDPROC
+
+    !-----------------------------------------------------------------
+    ! Coil read cache.
+    !
+    ! Each FC01 request resolves CoilsQuantity signals via AliasIO; with a 50 ms
+    ! poll and 64-coil reads that is >1k AliasIO calls per second, all dynamic
+    ! string lookups. The arrays below resolve each signal once and reuse the
+    ! handle. State: 0=uncached, 1=ready, 2=missing-in-EIO (skipped silently
+    ! after the first failure is logged by the Main ERROR handler).
+    !
+    ! Note: arrays of signaldo/signaldi at module scope are supported on
+    ! RW6.10+ and all RW7. On older RW5 / early RW6 controllers the compiler
+    ! rejects "VAR signaldo doCoilCache{160}" - in that case replace this whole
+    ! cache block with the original uncached MbGetDO/MbGetDI calls (slower but
+    ! portable), or store the resolved names in a string array and re-AliasIO
+    ! into a single local signaldo per call.
+    !-----------------------------------------------------------------
+    LOCAL VAR signaldo doCoilCache{160};
+    LOCAL VAR signaldi diCoilCache{160};
+    LOCAL VAR num    coilCacheState{160};
+
+    FUNC num ReadCachedDO(num address,string prefix)
+        IF coilCacheState{address+1}=0 THEN
+            AliasIO prefix+ValToStr(address),doCoilCache{address+1};
+            coilCacheState{address+1}:=1;
+        ENDIF
+        IF coilCacheState{address+1}=1 RETURN doCoilCache{address+1};
+        RETURN 0;
+    ERROR
+        coilCacheState{address+1}:=2;
+        RAISE;
+    ENDFUNC
+
+    FUNC num ReadCachedDI(num address,string prefix)
+        IF coilCacheState{address+1}=0 THEN
+            AliasIO prefix+ValToStr(address),diCoilCache{address+1};
+            coilCacheState{address+1}:=1;
+        ENDIF
+        IF coilCacheState{address+1}=1 RETURN diCoilCache{address+1};
+        RETURN 0;
+    ERROR
+        coilCacheState{address+1}:=2;
+        RAISE;
+    ENDFUNC
 
     PROC MbSetDI(string Name,num Value)
         VAR signaldo do1;

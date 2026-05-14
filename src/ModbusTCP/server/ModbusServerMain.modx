@@ -38,8 +38,12 @@ MODULE ModbusServerMain
     ! When modify MbServerConfig IP address as Robot WAN IP, Enabling Rapidsocket in firewall and WARMSTART are REQUIRED!
     CONST ModbusServerConfig MbServerConfig:=["192.168.125.1",502,0.01,0,0,0];
     CONST ModbusServerConfig VirtualConfig:=["127.0.0.1",502,0.01,0,0,0];
-    ! [PERIOD_TIME]: Modbus Server Default Response Period 200ms
-    LOCAL CONST num PERIOD_TIME:=0.2;
+    ! [PERIOD_TIME]: Modbus Server Response Period.
+    ! 50 ms gives a snappy HMI without overloading the controller.
+    ! Raise to 0.2 for low-traffic deployments to reduce CPU load.
+    LOCAL CONST num PERIOD_TIME:=0.05;
+    ! [ACCEPT_TIMEOUT]: Max wait for HMI to (re)connect before logging a heartbeat.
+    LOCAL CONST num ACCEPT_TIMEOUT:=5;
     LOCAL CONST string ModbusServerLogFile:="ModbusServer.txt";
     Task VAR ModbusServerConfig ServerConfig;
 
@@ -86,8 +90,15 @@ MODULE ModbusServerMain
             SocketCreate Server;
             SocketBind Server,ServerConfig.IP,ServerConfig.Port;
             SocketListen Server;
-            SocketAccept Server,Client\ClientAddress:=clientIP;   !default wait for 60s
+            ! Short accept timeout + heartbeat log avoids the silent 60s wait of the
+            ! default SocketAccept; useful to spot HMI offline / wrong IP early.
+            ! Note: \Time is the RW6/RW7 keyword. On older RW5 controllers the
+            ! switch is \Wait (same semantics, seconds): SocketAccept ... \Wait:=ACCEPT_TIMEOUT;
+            SocketAccept Server,Client\ClientAddress:=clientIP\Time:=ACCEPT_TIMEOUT;
             MbServerStatus:=SocketGetStatus(Server)=SOCKET_LISTENING AND SocketGetStatus(Client)=SOCKET_CONNECTED;
+            IF MbServerStatus=FALSE THEN
+                ErrLog ID_INF_MB_COMM_ESTABLISHED\i,ERRSTR_TASK,"Modbus Server","Waiting for client on "+ServerConfig.IP+":"+ValToStr(ServerConfig.Port),MB_VERSION,ERRSTR_EMPTY;
+            ENDIF
         ENDWHILE
         
         ErrLog ID_INF_MB_COMM_ESTABLISHED\i,ERRSTR_TASK,"Modbus Server","Client IP: "+clientIP+" Port: "+ValToStr(ServerConfig.Port),MB_VERSION,ERRSTR_EMPTY;
@@ -127,6 +138,10 @@ MODULE ModbusServerMain
                     MbRequestHandle reqBytes,resBytes,resLen;
                     ! Send Modbus Server Response to Client
                     MbSendBytes Client,ServerConfig,resBytes,resLen;
+                ELSE
+                    ! Frame rejected by format check; without this log the request is
+                    ! dropped silently and the HMI sees only a timeout.
+                    ErrLog ID_ERR_MB_FORMAT,ERRSTR_TASK,"Modbus Server","MbCheckRequestFormat rejected frame from "+clientIP+" len="+ValToStr(reqLen),ERRSTR_UNUSED,ERRSTR_CONTEXT;
                 ENDIF
             ENDIF
             ClkStop clock1;
@@ -148,6 +163,17 @@ MODULE ModbusServerMain
         IF ERRNO=ERR_MB_FORMAT OR ERRNO=ERR_MB_FUNCTION THEN
             TRYNEXT;
         ENDIF
+        ! AliasIO failed inside CoilHandle: a coil was requested whose backing
+        ! signal (mb_doNN / mb_diNN) is not declared in EIO. Recover the cycle
+        ! instead of killing the task; log so the missing signal can be added.
+        ! Note: ERR_NAME_INVALID is the RW6/RW7 errno raised by AliasIO when the
+        ! signal name does not exist. RW5 raises ERR_ALIASIO_DEF (or in some
+        ! 5.15+ builds ERR_NAME_INVALID) - if the controller is RW5, replace by:
+        !   IF ERRNO=ERR_NAME_INVALID OR ERRNO=ERR_ALIASIO_DEF THEN
+        IF ERRNO=ERR_NAME_INVALID THEN
+            ErrLog ID_ERR_MB_FORMAT,ERRSTR_TASK,"Modbus Server","AliasIO failed (coil/reg signal not declared in EIO) ERRNO="+ValToStr(ERRNO),ERRSTR_UNUSED,ERRSTR_CONTEXT;
+            TRYNEXT;
+        ENDIF
         ! Normal client disconnection (e.g. HMI doing periodic close/reopen).
         ! Suppress log and recycle the socket by reopening the connection.
         IF ERRNO=ERR_SOCK_CLOSED OR ERRNO=ERR_SOCK_NOT_CONN OR ERRNO=ERR_SOCK_NET_UNREACH THEN
@@ -155,6 +181,9 @@ MODULE ModbusServerMain
             MbServerStatus:=FALSE;
             ExitCycle;
         ENDIF
+        ! Unknown error: log ERRNO before tearing down so the cause is visible
+        ! in the event log (previously the cycle exited silently).
+        ErrLog ID_ERR_MB_FORMAT,ERRSTR_TASK,"Modbus Server","Unhandled ERRNO="+ValToStr(ERRNO)+" recycling connection",ERRSTR_UNUSED,ERRSTR_CONTEXT;
         MbServerStatus:=FALSE;
         ExitCycle;
     ENDPROC
